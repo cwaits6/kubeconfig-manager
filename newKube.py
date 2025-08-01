@@ -25,27 +25,48 @@ def merge_section(target, source, section_name):
     """
     Merge the entries of section_name from source into target.
     If the target does not have the section, it will be created.
-    If an entry with the same name already exists in target, it will not be duplicated.
+    On name collisions:
+      - if the entries are identical: skip
+      - if they differ: prompt to overwrite
     """
     source_entries = source.get(section_name, [])
     if not isinstance(source_entries, list):
         sys.exit(f"Error: The {section_name} section in the input file is not a list.")
     
-    # Create the section in target if missing
+    # Ensure the section exists in target
     if section_name not in target or target[section_name] is None:
         target[section_name] = []
     
-    # Gather existing names in the target section to avoid duplicates.
-    existing_names = {entry.get('name') for entry in target[section_name] if isinstance(entry, dict)}
     for entry in source_entries:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or 'name' not in entry:
             continue
-        entry_name = entry.get('name')
-        if entry_name in existing_names:
-            print(f"Skipping duplicate {section_name[:-1]} entry with name '{entry_name}'.")
-            continue
-        target[section_name].append(entry)
-        print(f"Added {section_name[:-1]} entry with name '{entry_name}'.")
+        entry_name = entry['name']
+        
+        # Find existing entry with same name
+        existing_index = next(
+            (i for i, e in enumerate(target[section_name]) 
+             if isinstance(e, dict) and e.get('name') == entry_name),
+            None
+        )
+        
+        if existing_index is not None:
+            existing_entry = target[section_name][existing_index]
+            if existing_entry == entry:
+                print(f"Skipping identical {section_name[:-1]} '{entry_name}'.")
+            else:
+                # Prompt to overwrite
+                overwrite = questionary.confirm(
+                    f"A {section_name[:-1]} named '{entry_name}' already exists but differs. Overwrite?"
+                ).ask()
+                if overwrite:
+                    target[section_name][existing_index] = entry
+                    print(f"Overwritten {section_name[:-1]} '{entry_name}'.")
+                else:
+                    print(f"Kept existing {section_name[:-1]} '{entry_name}'.")
+        else:
+            # No collision → just add it
+            target[section_name].append(entry)
+            print(f"Added {section_name[:-1]} '{entry_name}'.")
 
 def prompt_change_context(config):
     """
