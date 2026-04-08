@@ -19,7 +19,7 @@
       "@semantic-release/git",
       {
         "assets": ["CHANGELOG.md", "pyproject.toml"],
-        "message": "chore(release): ${nextRelease.version}\n\n[skip ci]\n${nextRelease.notes}"
+        "message": "chore(release): ${nextRelease.version}\n\n${nextRelease.notes}"
       }
     ],
     [
