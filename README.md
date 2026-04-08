@@ -106,7 +106,7 @@ If you want an alias to add to your `.zshrc` or `.bashrc` file, here is a templa
 
 export UV_NATIVE_TLS=true
 export KCM_DIR="$HOME/repos/kubeconfig-manager"
-alias nkc=’uv run --project "$KCM_DIR" python "$KCM_DIR/newKube.py"’
+alias nkc='uv run --project "$KCM_DIR" python "$KCM_DIR/newKube.py"'
 ```
 
 With this alias, you can run either:
