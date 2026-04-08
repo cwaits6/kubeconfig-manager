@@ -6,6 +6,15 @@ import yaml
 import questionary
 import requests
 
+EMPTY_KUBECONFIG = {
+    "apiVersion": "v1",
+    "kind": "Config",
+    "clusters": [],
+    "contexts": [],
+    "users": [],
+    "current-context": "",
+}
+
 def load_yaml(path):
     try:
         with open(path, 'r') as f:
@@ -14,6 +23,21 @@ def load_yaml(path):
         sys.exit(f"Error: File not found: {path}")
     except yaml.YAMLError as e:
         sys.exit(f"Error: Could not parse YAML in {path}: {e}")
+
+def load_or_create_kubeconfig(path):
+    """Load a kubeconfig, creating a stub if the file is missing or invalid."""
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_yaml(path, EMPTY_KUBECONFIG)
+        os.chmod(path, 0o600)
+        print(f"Created empty kubeconfig at: {path}")
+        return dict(EMPTY_KUBECONFIG)
+    config = load_yaml(path)
+    if not isinstance(config, dict):
+        print(f"Warning: {path} is not a valid kubeconfig mapping. Reinitializing.")
+        write_yaml(path, EMPTY_KUBECONFIG)
+        return dict(EMPTY_KUBECONFIG)
+    return config
 
 def write_yaml(path, data):
     try:
@@ -133,6 +157,13 @@ instances:
         print("Please edit this file with your Rancher instance details and run again.")
         sys.exit(0)
 
+    # Check file permissions
+    file_mode = os.stat(config_path).st_mode & 0o777
+    if file_mode & 0o077:
+        sys.exit(f"Error: {config_path} has permissions {oct(file_mode)}. "
+                 "It must not be group/world readable (expected 0o600). "
+                 "Fix with: chmod 600 " + config_path)
+
     # Load and validate the config
     config = load_yaml(config_path)
     if not isinstance(config, dict) or 'instances' not in config:
@@ -149,6 +180,8 @@ instances:
         for required_field in ['name', 'url', 'token']:
             if required_field not in instance:
                 sys.exit(f"Error: Instance {i} is missing required field '{required_field}'.")
+        if not instance['url'].startswith("https://"):
+            sys.exit(f"Error: Instance '{instance['name']}' URL must use HTTPS (got: {instance['url']}).")
 
     return instances
 
@@ -215,11 +248,9 @@ def rancher_sync():
     instances = load_rancher_config()
     main_config_path = os.path.join(os.path.expanduser("~"), ".kube", "config")
 
-    # Load the main kubeconfig
+    # Load the main kubeconfig (create stub if missing)
     print(f"Loading main kubeconfig from: {main_config_path}")
-    main_config = load_yaml(main_config_path)
-    if not isinstance(main_config, dict):
-        sys.exit("Error: The main kubeconfig is not a valid YAML mapping.")
+    main_config = load_or_create_kubeconfig(main_config_path)
 
     total_merged = 0
 
@@ -267,15 +298,23 @@ def main():
         input_path = os.path.abspath(args.input_kubeconfig)
         main_config_path = os.path.join(os.path.expanduser("~"), ".kube", "config")
 
+        # Guard against merging the live kubeconfig into itself
+        try:
+            if os.path.samefile(input_path, main_config_path):
+                sys.exit("Error: Input file is the same as the main kubeconfig. Cannot merge a file into itself.")
+        except OSError:
+            if os.path.abspath(input_path) == os.path.abspath(main_config_path):
+                sys.exit("Error: Input file is the same as the main kubeconfig. Cannot merge a file into itself.")
+
         # Load the input kubeconfig
         print(f"Loading input kubeconfig from: {input_path}")
         input_config = load_yaml(input_path)
+        if not isinstance(input_config, dict):
+            sys.exit("Error: The input kubeconfig is not a valid YAML mapping.")
 
-        # Load the main kubeconfig
+        # Load the main kubeconfig (create stub if missing)
         print(f"Loading main kubeconfig from: {main_config_path}")
-        main_config = load_yaml(main_config_path)
-        if not isinstance(main_config, dict):
-            sys.exit("Error: The main kubeconfig is not a valid YAML mapping.")
+        main_config = load_or_create_kubeconfig(main_config_path)
 
         # Merge the sections: clusters, contexts, users
         for section in ["clusters", "contexts", "users"]:
