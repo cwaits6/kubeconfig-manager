@@ -117,16 +117,24 @@ nkc --rancher
 
 ## Use Cases
 
-**Manual file merging:**
-- Adding a new EKS cluster (generated via `aws eks update-kubeconfig`)
-- Integrating kubeconfigs from on-premises clusters
-- Combining kubeconfigs from different cloud providers
-- Safe merging with interactive conflict resolution
+### With Rancher (`--rancher`)
 
-**Rancher sync:**
-- Keep kubeconfigs fresh across multiple Rancher instances without manual downloads
+If you manage clusters through Rancher — including EKS, RKE2, K3s, or any other downstream cluster type — the `--rancher` flag is the easiest way to keep your kubeconfig up to date:
+
+- Sync kubeconfigs for **all downstream clusters** (EKS, RKE2, K3s, etc.) in one command
+- Keep credentials fresh across multiple Rancher instances without manual downloads
 - Automate credential rotation by running `nkc --rancher` on a schedule (cron job, etc.)
-- Consolidate access to all Rancher-managed clusters in one place
+
+> **EKS clusters in Rancher:** If your EKS cluster is registered as a downstream cluster in Rancher, use `nkc --rancher` to manage its kubeconfig — no need to run `aws eks update-kubeconfig` separately. Rancher handles credential management for all downstream clusters, regardless of where they're hosted.
+
+### Without Rancher (file merge)
+
+If you're not using Rancher, the file merge mode works with kubeconfigs from any source:
+
+- Kubeconfigs exported from cloud providers (AWS EKS, GKE, AKS, etc.)
+- On-premises or bare-metal cluster configs
+- Configs from other management platforms
+- Any valid kubeconfig YAML file
 
 ---
 
@@ -169,15 +177,17 @@ This file is created with **600 permissions** (readable/writable by you only). S
 
 ---
 
-## AWS EKS + Other Clouds
+## Cloud Provider Notes
 
-This tool works great for managing multiple cluster types:
+### AWS EKS
 
-- **AWS EKS:** Use `aws eks update-kubeconfig` to generate kubeconfig files, then merge them with this tool
-- **Rancher:** Use `--rancher` to automatically sync all Rancher-managed clusters
-- **On-premises/other clouds:** Export kubeconfigs and merge them via the file mode
+If your EKS clusters are registered as **downstream clusters in Rancher**, use `nkc --rancher` to manage their kubeconfigs. Rancher generates kubeconfigs that route through its authentication proxy, handling credential management for you. This is the recommended approach — it eliminates the need to manage AWS CLI authentication separately for each cluster.
 
-The EKS kubeconfigs use exec plugins that fetch short-lived tokens on-demand, so they don't need manual renewal — this tool simply consolidates multiple kubeconfigs into one place.
+If you're **not using Rancher**, you can still use this tool with EKS. Generate kubeconfigs with `aws eks update-kubeconfig`, then merge them using the file mode. EKS kubeconfigs use exec plugins that fetch short-lived tokens on-demand, so they don't require manual credential renewal.
+
+### GKE, AKS, and other providers
+
+Export kubeconfigs from your provider and merge them using the file mode. If the cluster is managed as a Rancher downstream cluster, use `--rancher` instead.
 
 ---
 
