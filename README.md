@@ -1,5 +1,11 @@
 # kubeconfig-manager
 
+[![Python](https://img.shields.io/badge/Python-3.13+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![Release](https://img.shields.io/github/v/release/cwaits6/kubeconfig-manager?style=flat-square&logo=github)](https://github.com/cwaits6/kubeconfig-manager/releases/latest)
+[![Release](https://github.com/cwaits6/kubeconfig-manager/actions/workflows/release.yml/badge.svg)](https://github.com/cwaits6/kubeconfig-manager/actions/workflows/release.yml)
+[![PR](https://github.com/cwaits6/kubeconfig-manager/actions/workflows/pr.yml/badge.svg)](https://github.com/cwaits6/kubeconfig-manager/actions/workflows/pr.yml)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](./LICENSE)
+
 A lightweight Python CLI to merge Kubernetes kubeconfig files into your main `~/.kube/config` from two sources:
 
 1. **Manual kubeconfig files** — Download and merge kubeconfigs from any cluster (EKS, on-prem, etc.)
