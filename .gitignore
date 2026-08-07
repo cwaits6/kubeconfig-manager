@@ -22,4 +22,6 @@ rancher.local.yaml
 kubeconfig
 kubeconfig*.yaml
 *.kubeconfig
+.kube/config
+**/.kube/config
 
