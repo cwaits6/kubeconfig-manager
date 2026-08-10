@@ -16,3 +16,12 @@ __pycache__/
 
 .DS_Store
 
+# Secrets / local configs — never commit Rancher tokens or kubeconfigs
+rancher.yaml
+rancher.local.yaml
+kubeconfig
+kubeconfig*.yaml
+*.kubeconfig
+.kube/config
+**/.kube/config
+
