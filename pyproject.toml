@@ -10,3 +10,7 @@ dependencies = [
     "requests>=2.32.0",
 ]
 
+[tool.uv]
+exclude-newer = "7 days"
+constraint-dependencies = ["urllib3>=2.7.0"]
+
