@@ -11,7 +11,5 @@ dependencies = [
 ]
 
 [tool.uv]
-# Floor the transitive urllib3 (via requests) to a patched release.
-# 2.6.3 is affected by CVE-2026-44431 and CVE-2026-44432 (fixed in 2.7.0).
 constraint-dependencies = ["urllib3>=2.7.0"]
 
