@@ -342,7 +342,18 @@ def plan_cluster_names(instance, clusters):
         for cluster in clusters:
             if cluster.get('id'):
                 managed.choose_name(instance, cluster['id'], instance['_state'],
-                                    instance.get('_interactive', False), instance.get('_rename', False))
+                                    instance.get('_interactive', False), instance.get('_rename', False),
+                                    cluster_name=cluster.get('name') or cluster['id'])
+
+def existing_context_names(path):
+    """Read existing names for collision protection without modifying the file."""
+    if not os.path.exists(path):
+        return []
+    config = load_yaml(path)
+    if not isinstance(config, dict) or not isinstance(config.get('contexts', []), list):
+        raise managed.ManagedError('Cannot check naming conflicts in an invalid main kubeconfig.')
+    return [entry['name'] for entry in config.get('contexts', [])
+            if isinstance(entry, dict) and isinstance(entry.get('name'), str)]
 
 def rancher_sync(managed_tokens=False, rename=False, non_interactive=False, ttl_hours=24,
                  cleanup_tokens=False, delete=False):
@@ -370,28 +381,42 @@ def rancher_sync(managed_tokens=False, rename=False, non_interactive=False, ttl_
     failures = 0
     owners = {}
     reserved_names = {}
+    name_labels = {}
+    instance_labels = {instance['url'].rstrip('/'): instance['name'] for instance in instances}
     for url, names in state['names'].items():
         for cluster_id, context_name in names.items():
             reserved_names[context_name] = (url, cluster_id)
+            name_labels[(url, cluster_id)] = f"cluster ID '{cluster_id}' in Rancher '{instance_labels.get(url, url)}'"
     for instance in instances:
         for cluster_id, context_name in instance.get('context_names', {}).items():
             identity = (instance['url'].rstrip('/'), cluster_id)
             if context_name in reserved_names and reserved_names[context_name] != identity:
                 raise managed.ManagedError('Configured context names must be unique across Rancher clusters.')
             reserved_names[context_name] = identity
+    for context_name in existing_context_names(main_config_path):
+        if context_name not in reserved_names:
+            identity = ('existing kubeconfig', context_name)
+            reserved_names[context_name] = identity
+            name_labels[identity] = f"existing kubeconfig context '{context_name}'"
 
     # Plan names across every instance before any token-creating request.
     plans = []
     for instance in instances:
         instance.update({'_state': state, '_interactive': interactive, '_rename': rename,
                          '_managed_tokens': managed_tokens, '_ttl_hours': ttl_hours,
-                         '_reserved_names': reserved_names})
+                         '_reserved_names': reserved_names, '_name_labels': name_labels})
         print(f"\nSyncing from Rancher instance: {instance['name']}")
         clusters, failed = list_rancher_clusters(instance)
         failures += failed
+        for cluster in clusters:
+            if cluster.get('id'):
+                identity = (instance['url'].rstrip('/'), cluster['id'])
+                name_labels[identity] = f"cluster '{cluster.get('name') or cluster['id']}' (ID: {cluster['id']}) in Rancher '{instance['name']}'"
+        plans.append((instance, clusters))
+
+    for instance, clusters in plans:
         plan_cluster_names(instance, clusters)
         instance['_names_planned'] = True
-        plans.append((instance, clusters))
 
     for instance, clusters in plans:
         kubeconfigs, failed = fetch_rancher_kubeconfigs(instance, clusters)
