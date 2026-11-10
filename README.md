@@ -111,17 +111,24 @@ Scheduled runs must receive the exported variables too; they may not load zsh.
 
 #### Persistent context names
 
-By default, contexts use `<instance-name>-<cluster-id>` (for example,
-`prod-rancher-local`). On the first interactive sync, the CLI offers a name for
-each new cluster, identifying its Rancher instance and cluster ID. Accept the
-default or type something like `prod-management`. Choices are stored in
+New contexts default to the cluster's Rancher display name (or cluster ID if
+there is no display name). On the first interactive sync, the CLI shows the
+display name, Rancher instance, and cluster ID, then asks whether to use that
+context name. Decline to type a different name, such as `prod-management`.
+If the name conflicts, the CLI identifies the other Rancher cluster or existing
+kubeconfig context and asks for a unique name, suggesting an instance prefix.
+Choices are stored in
 `~/.config/kubeconfig-manager/state.yaml`, keyed by Rancher URL and cluster ID.
 Future syncs reuse them, even after token rotation or instance display-name
 changes. Keep the Rancher URL stable to retain this association.
 
 Use `--rancher --rename-contexts` to prompt again. Use `--non-interactive` for
 saved/default names without prompts. Non-terminal runs also use saved/default
-names. Interactive validation rejects names already assigned to another cluster.
+names, but stop on a conflict instead of silently picking a different name.
+Interactive validation rejects names already assigned to another cluster.
+Saved choices remain unchanged when Rancher display names change; only an
+explicit `--rename-contexts` prompt or a declarative `context_names` override
+changes them. Naming for all instances finishes before any credentials are created.
 
 For declarative configuration, `context_names` on each instance overrides saved
 choices and bypasses prompts for those cluster IDs:

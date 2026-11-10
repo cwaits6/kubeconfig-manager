@@ -18,6 +18,9 @@ class ManagedTests(unittest.TestCase):
         """Isolate tests from real credentials, network requests, and user state."""
         self.instance = {'name': 'prod', 'url': 'https://example.test', 'token': 'api:synthetic'}
         self.state = {'installation_id': 'installation', 'names': {}, 'tokens': []}
+        prompts = patch.object(managed.questionary, 'confirm')
+        prompts.start().return_value.ask.return_value = False
+        self.addCleanup(prompts.stop)
         self.output = io.StringIO()
         redirect = contextlib.redirect_stdout(self.output)
         redirect.__enter__()
@@ -63,8 +66,54 @@ class ManagedTests(unittest.TestCase):
 
     def test_noninteractive_names_are_stable(self):
         """Regression coverage: noninteractive names are stable."""
-        self.assertEqual(managed.choose_name(self.instance, 'local', self.state), 'prod-local')
-        self.assertEqual(self.state['names']['https://example.test']['local'], 'prod-local')
+        self.assertEqual(managed.choose_name(self.instance, 'local', self.state), 'local')
+        self.assertEqual(self.state['names']['https://example.test']['local'], 'local')
+
+    @patch.object(managed.questionary, 'text')
+    @patch.object(managed.questionary, 'confirm')
+    def test_first_sync_accepts_rancher_display_name(self, confirm, text):
+        """Use the display name after confirmation and never prompt on later syncs."""
+        confirm.return_value.ask.return_value = True
+        self.assertEqual(managed.choose_name(self.instance, 'c-123', self.state, True,
+                                            cluster_name='production'), 'production')
+        self.instance.pop('context_names')
+        self.assertEqual(managed.choose_name(self.instance, 'c-123', self.state, True,
+                                            cluster_name='changed-in-rancher'), 'production')
+        confirm.assert_called_once()
+        text.assert_not_called()
+
+    @patch.object(managed.questionary, 'text')
+    def test_display_name_conflict_identifies_other_cluster(self, text):
+        """Explain the other Rancher and cluster before asking for a unique name."""
+        owner = ('https://stage.test', 'local')
+        self.instance['_reserved_names'] = {'local': owner}
+        self.instance['_name_labels'] = {owner: "cluster 'local' (ID: local) in Rancher 'stage'"}
+        text.return_value.ask.return_value = 'prod-management'
+        self.assertEqual(managed.choose_name(self.instance, 'local', self.state, True,
+                                            cluster_name='local'), 'prod-management')
+        self.assertIn("in Rancher 'stage'", self.output.getvalue())
+        self.assertEqual(text.call_args.kwargs['default'], 'prod-local')
+
+    @patch.object(managed.questionary, 'text')
+    @patch.object(managed.questionary, 'confirm')
+    def test_saved_name_collision_does_not_silently_rename(self, confirm, text):
+        """Keep saved names immutable without an explicit rename request."""
+        self.state['names'] = {'https://example.test': {'local': 'chosen'}}
+        self.instance['_reserved_names'] = {'chosen': ('existing kubeconfig', 'chosen')}
+        with self.assertRaises(managed.ManagedError):
+            managed.choose_name(self.instance, 'local', self.state, True, cluster_name='local')
+        confirm.assert_not_called()
+        text.assert_not_called()
+        self.assertEqual(self.state['names']['https://example.test']['local'], 'chosen')
+
+    def test_noninteractive_conflict_explains_existing_context(self):
+        """Refuse collisions with existing local contexts when no prompt is possible."""
+        owner = ('existing kubeconfig', 'production')
+        self.instance['_reserved_names'] = {'production': owner}
+        self.instance['_name_labels'] = {owner: "existing kubeconfig context 'production'"}
+        with self.assertRaises(managed.ManagedError) as error:
+            managed.choose_name(self.instance, 'c-123', self.state, cluster_name='production')
+        self.assertIn("existing kubeconfig context 'production'", str(error.exception))
 
     @patch.object(managed.questionary, 'text')
     def test_conflicting_name_is_rejected_by_prompt_validator(self, text):
@@ -287,7 +336,7 @@ class ManagedTests(unittest.TestCase):
                 self.assertNotIn('synthetic', (config_dir / 'state.yaml').read_text())
                 main_config = yaml.safe_load((Path(directory) / '.kube/config').read_text())
                 self.assertEqual(len(main_config['users']), 1)
-                self.assertEqual(main_config['contexts'][0]['name'], 'prod-local')
+                self.assertEqual(main_config['contexts'][0]['name'], 'local')
                 self.assertEqual(app.rancher_sync(cleanup_tokens=True), 0)
                 self.assertEqual(deleted, [])
                 with (patch.object(app.sys.stdin, 'isatty', return_value=True),

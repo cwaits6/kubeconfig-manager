@@ -28,6 +28,9 @@ class RancherTests(unittest.TestCase):
         network = patch.object(app.requests, 'get')
         network.start().json.return_value = {'data': []}
         self.addCleanup(network.stop)
+        contexts = patch.object(app, 'existing_context_names', return_value=[])
+        contexts.start()
+        self.addCleanup(contexts.stop)
         # Never inspect the developer's real ownership state or credentials.
         state = patch.object(app.managed, 'load_state', return_value={'installation_id': 'test', 'names': {}, 'tokens': []})
         state.start()

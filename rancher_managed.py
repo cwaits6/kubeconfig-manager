@@ -112,34 +112,56 @@ def resolve_token(instance):
     return token
 
 
-def choose_name(instance, cluster_id, state, interactive=False, rename=False):
+def choose_name(instance, cluster_id, state, interactive=False, rename=False, cluster_name=None):
     """Choose and reserve a persistent name for one Rancher URL and cluster ID."""
     url = instance['url'].rstrip('/')
     saved = state['names'].setdefault(url, {})
     configured = instance.get('context_names', {}).get(cluster_id)
-    default = configured or saved.get(cluster_id) or f"{instance['name']}-{cluster_id}"
+    display_name = (cluster_name or cluster_id).strip()
+    default = configured or saved.get(cluster_id) or display_name
     identity = (url, cluster_id)
     reserved = instance.get('_reserved_names', {})
+    labels = instance.get('_name_labels', {})
+
+    def conflict(value):
+        """Describe the cluster or local context that already owns this name."""
+        owner = reserved.get(value.strip())
+        if owner is None or owner == identity:
+            return None
+        description = labels.get(owner, f"cluster '{owner[1]}' at Rancher '{owner[0]}'")
+        return f"Context name '{value.strip()}' conflicts with {description}."
 
     def validate(value):
         """Reject blank names and names reserved by another cluster."""
         if not value.strip():
             return 'Enter a context name.'
-        if value.strip() in reserved and reserved[value.strip()] != identity:
-            return 'That name belongs to another Rancher cluster. Choose a unique name.'
+        if conflict(value):
+            return conflict(value) + ' Choose a unique name.'
         return True
 
     if interactive and not configured and (rename or cluster_id not in saved):
-        selected = questionary.text(
-            f"Context name for '{cluster_id}' from '{instance['name']}' (saved for future syncs):",
-            default=default,
-            validate=validate,
+        print(f"Cluster '{display_name}' (ID: {cluster_id}) from Rancher '{instance['name']}'.")
+        collision = conflict(default)
+        if collision:
+            print(collision)
+        change = True if rename or collision else questionary.confirm(
+            f"Use context name '{default}'?", default=True,
         ).ask()
-        if selected is None:
+        if change is None:
             raise ManagedError('Naming canceled; no kubeconfig was written.')
-        default = selected.strip()
+        # On first use, confirming accepts the display name. A conflict or the
+        # explicit rename flag goes directly to the name entry prompt.
+        if rename or collision or not change:
+            suggestion = f"{instance['name']}-{display_name}" if collision else default
+            selected = questionary.text(
+                f"Context name for '{display_name}' (ID: {cluster_id}) from '{instance['name']}' (saved for future syncs):",
+                default=suggestion, validate=validate,
+            ).ask()
+            if selected is None:
+                raise ManagedError('Naming canceled; no kubeconfig was written.')
+            default = selected.strip()
     if validate(default) is not True:
-        raise ManagedError('Context naming collision. Choose unique names or run --rename-contexts.')
+        raise ManagedError((conflict(default) or 'Invalid context name.') + ' Choose a unique context_names mapping or run --rename-contexts.')
     saved[cluster_id] = default
     reserved[default] = identity
     instance.setdefault('context_names', {})[cluster_id] = default
