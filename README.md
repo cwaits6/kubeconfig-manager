@@ -19,7 +19,8 @@ Handles conflicts interactively, auto-deletes merged files, and lets you switch 
 
 * **File merging** — Safely merge clusters, contexts, and users from downloaded kubeconfig files
 * **Rancher sync** — Automatically fetch kubeconfigs from all clusters across multiple Rancher instances
-* **Conflict handling** — Detects and prompts before overwriting existing entries (file mode) or silently overwrites with fresh credentials (Rancher mode)
+* **Conflict handling** — Prompts before overwriting entries in file mode; Rancher sync uses instance-qualified names and refreshes credentials
+* **Persistent Rancher names** — Choose context names by Rancher cluster ID, including each instance's `local` cluster
 * **Auto-cleanup** — Deletes source files after successful merge
 * **Context switching** — Interactively select a new current context
 * **Secure credential storage** — Rancher API tokens stored locally with 600 permissions
@@ -74,10 +75,10 @@ uv run python newKube.py --rancher
 instances:
   - name: prod-rancher
     url: https://rancher.prod.example.com
-    token: token-abcde:secretkey
+    token_env: PROD_RANCHER_TOKEN
   - name: staging-rancher
     url: https://rancher.staging.example.com
-    token: token-fghij:secretkey
+    token_env: STAGING_RANCHER_TOKEN
     verify_ssl: false  # optional, for self-signed certs
 ```
 
@@ -92,6 +93,112 @@ The tool will:
 - **Silently overwrite** existing entries with fresh credentials (ideal for credential rotation)
 - Merge everything into `~/.kube/config` in one operation
 - Print a summary of what was synced
+
+Use `token_env` to name an exported environment variable containing the complete
+API key. For example, add the following yourself to your private shell file,
+replacing the placeholders there, then load it in your own shell:
+
+```zsh
+export PROD_RANCHER_TOKEN='ACCESS_KEY:SECRET_KEY'
+export STAGING_RANCHER_TOKEN='ACCESS_KEY:SECRET_KEY'
+```
+
+The CLI reads only the named variables at runtime. It does not open or source
+shell files, print token values, or copy environment tokens into its YAML files.
+Use exactly one of `token_env` or a literal `token` per instance; both formats
+are supported. A missing variable stops sync before any network requests.
+Scheduled runs must receive the exported variables too; they may not load zsh.
+
+#### Persistent context names
+
+By default, contexts use `<instance-name>-<cluster-id>` (for example,
+`prod-rancher-local`). On the first interactive sync, the CLI offers a name for
+each new cluster, identifying its Rancher instance and cluster ID. Accept the
+default or type something like `prod-management`. Choices are stored in
+`~/.config/kubeconfig-manager/state.yaml`, keyed by Rancher URL and cluster ID.
+Future syncs reuse them, even after token rotation or instance display-name
+changes. Keep the Rancher URL stable to retain this association.
+
+Use `--rancher --rename-contexts` to prompt again. Use `--non-interactive` for
+saved/default names without prompts. Non-terminal runs also use saved/default
+names. Interactive validation rejects names already assigned to another cluster.
+
+For declarative configuration, `context_names` on each instance overrides saved
+choices and bypasses prompts for those cluster IDs:
+
+```yaml
+context_names:
+  local: prod-management
+  c-xxxxx: prod-workloads
+```
+
+Keys are stable Rancher cluster IDs, not display names.
+
+Cluster and user entries are also qualified, and context references are updated
+together, so two Rancher instances cannot overwrite each other's `local`
+credentials. Additional contexts in a generated kubeconfig use
+`<chosen-name>::<original-context-name>`. Choose unique names across all mappings;
+duplicate generated entry names abort the sync before writing the kubeconfig.
+
+Existing entries from earlier versions are retained. After the first successful
+sync, select one of the new contexts explicitly with
+`kubectl config use-context prod-management`. The old shared `local` context
+cannot reliably identify which Rancher it belonged to and is not automatically
+removed or selected. Changing a mapping later creates entries under the new name;
+previous entries remain until you remove them yourself.
+
+#### HTTP 401 after token rotation
+
+Sync reads each token from the configured `token_env` variable or literal
+`token` in `~/.config/kubeconfig-manager/rancher.yaml`. Rotating a token in Rancher
+requires updating that source too. Use the **complete API key** in
+`access-key:secret-key` format from the corresponding Rancher instance, without
+a `Bearer` prefix or surrounding whitespace. Make sure the token is active,
+unexpired, and scoped for the clusters you want to sync.
+
+HTTP 401 means the server rejected the configured credentials. HTTP 403 means
+access was denied; check token scope and permissions. Failed requests produce
+a nonzero exit status. If every fetch fails, the main kubeconfig is left untouched;
+if some succeed, those are merged and the sync reports its failures.
+
+#### Managed tokens and reviewed cleanup
+
+```sh
+nkc --rancher --managed-tokens --token-ttl-hours 24
+nkc --rancher --cleanup-tokens
+nkc --rancher --cleanup-tokens --delete
+```
+
+Managed mode creates a fresh cluster-scoped token on each sync, with an explicit
+lifetime (24 hours by default, subject to Rancher limits). Your configured API
+key needs permission to create and inspect its tokens. The CLI builds a
+kubeconfig using Rancher's HTTPS proxy and verifies the new credential against
+the cluster's `/version` endpoint before publishing it. This mode does not call
+`generateKubeconfig`, and supplies only the Rancher proxy context, not direct
+cluster endpoints. The generated kubeconfig uses the system CA trust; an
+instance with `verify_ssl: false` also produces a context that skips TLS
+verification. Sync again before the managed token expires.
+
+Each created token has a unique description containing `kubeconfig-manager`,
+the installation ID, and cluster ID. Its ID, server UUID, user, cluster, and
+description are recorded in `state.yaml` with permissions 600. Token secrets
+are stored only in the kubeconfig. Back up the state file: losing it also loses
+the CLI's proof of ownership. Concurrent CLI sync/cleanup runs are blocked by
+a local file lock.
+
+Cleanup previews only tokens with matching ownership records. It excludes the
+authentication token, tokens marked active, and tokens still referenced anywhere
+in the main kubeconfig. Deletion requires an interactive confirmation and checks
+ownership and kubeconfig references again before revocation. It never adopts
+or deletes existing untracked Rancher tokens based solely on their descriptions.
+Those need separate manual review, because Rancher may reuse generated tokens.
+
+Old entries retained after renaming keep their credentials protected from cleanup.
+Remove those obsolete local entries when you no longer need them, then sync to
+refresh the ownership state. Other kubeconfig files and machines are not tracked;
+revoking a token also invalidates any copies using it. If a token creation request
+succeeds remotely but the response or local state write is lost, review that
+token manually; the CLI will not infer ownership to delete an unrecorded token.
 
 ---
 
