@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+from copy import deepcopy
 import os
 import sys
 import yaml
 import questionary
 import requests
+from urllib.parse import urlsplit
+
+import rancher_managed as managed
 
 EMPTY_KUBECONFIG = {
     "apiVersion": "v1",
@@ -21,8 +25,8 @@ def load_yaml(path):
             return yaml.safe_load(f)
     except FileNotFoundError:
         sys.exit(f"Error: File not found: {path}")
-    except yaml.YAMLError as e:
-        sys.exit(f"Error: Could not parse YAML in {path}: {e}")
+    except yaml.YAMLError:
+        sys.exit(f"Error: Could not parse YAML in {path}. Details suppressed to protect credentials.")
 
 def load_or_create_kubeconfig(path):
     """Load a kubeconfig, creating a stub if the file is missing or invalid."""
@@ -143,12 +147,13 @@ def load_rancher_config():
         os.makedirs(config_dir, exist_ok=True)
 
         template = """# Rancher instances for kubeconfig-manager
-# Each entry requires: name, url, token
+# Each entry requires: name, url, and either token_env or token
 # Optional: verify_ssl: false  (for self-signed certs, default true)
+# Optional: context_names: {local: my-management-cluster}
 instances:
   # - name: my-rancher
   #   url: https://rancher.example.com
-  #   token: token-abcde:secretkey
+  #   token_env: MY_RANCHER_TOKEN  # exported by your shell
 """
         with open(config_path, 'w') as f:
             f.write(template)
@@ -174,23 +179,80 @@ instances:
         sys.exit(f"Error: 'instances' in {config_path} must be a non-empty list.")
 
     # Validate each instance
+    names = set()
     for i, instance in enumerate(instances):
         if not isinstance(instance, dict):
             sys.exit(f"Error: Instance {i} is not a dictionary.")
-        for required_field in ['name', 'url', 'token']:
+        for required_field in ['name', 'url']:
             if required_field not in instance:
                 sys.exit(f"Error: Instance {i} is missing required field '{required_field}'.")
-        if not instance['url'].startswith("https://"):
-            sys.exit(f"Error: Instance '{instance['name']}' URL must use HTTPS (got: {instance['url']}).")
+            if not isinstance(instance[required_field], str) or not instance[required_field].strip():
+                sys.exit(f"Error: Instance {i} field '{required_field}' must be a non-empty string.")
+        if instance['name'] in names:
+            sys.exit("Error: Rancher instance names must be unique.")
+        names.add(instance['name'])
+        parsed = urlsplit(instance['url'])
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            sys.exit(f"Error: Instance '{instance['name']}' requires an HTTPS URL without embedded credentials, query, or fragment.")
+        try:
+            instance['token'] = managed.resolve_token(instance)
+        except managed.ManagedError as error:
+            sys.exit(f"Error: Instance '{instance['name']}': {error}")
+        context_names = instance.get('context_names', {})
+        if not isinstance(context_names, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) or not value.strip()
+            for key, value in context_names.items()
+        ):
+            sys.exit(f"Error: Instance '{instance['name']}' context_names must map cluster IDs to non-empty names.")
 
     return instances
+
+def name_rancher_kubeconfig(config, instance, cluster_id):
+    """Use a stable cluster ID mapping and rename every reference together."""
+    config = deepcopy(config)
+    base = instance.get('context_names', {}).get(cluster_id, f"{instance['name']}-{cluster_id}")
+    primary = config.get('current-context')
+    contexts = config.get('contexts', [])
+    if not primary and contexts:
+        primary = contexts[0]['name']
+    mappings = {}
+    for section in ('clusters', 'users', 'contexts'):
+        mappings[section] = {
+            entry['name']: (base if section == 'contexts' and entry['name'] == primary
+                            else f"{base}::{entry['name']}")
+            for entry in config.get(section, [])
+        }
+        for entry in config.get(section, []):
+            entry['name'] = mappings[section][entry['name']]
+    for entry in contexts:
+        context = entry['context']
+        for field, section in (('cluster', 'clusters'), ('user', 'users')):
+            if field in context:
+                context[field] = mappings[section][context[field]]
+    if primary:
+        config['current-context'] = mappings['contexts'][primary]
+    return config
+
+def report_rancher_error(error, name, operation):
+    """Never include response bodies, request URLs, or credentials in errors."""
+    status = error.response.status_code if error.response is not None else None
+    if status == 401:
+        detail = ("HTTP 401: Rancher rejected the configured API token. Update token in "
+                  "~/.config/kubeconfig-manager/rancher.yaml or its token_env variable with the complete access-key:secret-key "
+                  "pair issued by this Rancher instance; check expiration/revocation and token scope.")
+    elif status == 403:
+        detail = "HTTP 403: Access denied; check the token's cluster scope and Rancher permissions."
+    else:
+        detail = f"HTTP {status}" if status else type(error).__name__
+    print(f"Warning: {operation} failed for '{name}': {detail}")
 
 def fetch_rancher_kubeconfigs(instance):
     """
     Fetch kubeconfigs for all clusters from a Rancher instance.
-    Returns a list of kubeconfig YAML strings.
+    Returns named kubeconfig mappings and the number of failed requests.
     """
-    url = instance['url']
+    url = instance['url'].rstrip('/')
     token = instance['token']
     name = instance['name']
     verify_ssl = instance.get('verify_ssl', True)
@@ -209,22 +271,31 @@ def fetch_rancher_kubeconfigs(instance):
         response.raise_for_status()
         clusters_data = response.json()
     except requests.exceptions.RequestException as e:
-        print(f"Warning: Could not fetch cluster list from '{name}' ({url}): {e}")
-        return []
+        report_rancher_error(e, name, 'Fetching cluster list')
+        return [], 1
 
     # Extract cluster IDs
     clusters = clusters_data.get('data', [])
     if not clusters:
         print(f"No clusters found in '{name}'.")
-        return []
+        return [], 0
 
     # Fetch kubeconfig for each cluster
+    failures = 0
     for cluster in clusters:
         cluster_id = cluster.get('id')
         if not cluster_id:
             continue
 
+        if '_state' in instance:
+            managed.choose_name(instance, cluster_id, instance['_state'],
+                                instance.get('_interactive', False), instance.get('_rename', False))
         try:
+            if instance.get('_managed_tokens'):
+                cluster_config = managed.create_kubeconfig(
+                    instance, cluster_id, instance['_state'], instance['_ttl_hours'])
+                kubeconfigs.append(name_rancher_kubeconfig(cluster_config, instance, cluster_id))
+                continue
             kubeconfig_url = f"{url}/v3/clusters/{cluster_id}?action=generateKubeconfig"
             response = requests.post(kubeconfig_url, headers=headers, verify=verify_ssl, timeout=10)
             response.raise_for_status()
@@ -232,57 +303,118 @@ def fetch_rancher_kubeconfigs(instance):
             kubeconfig_yaml = kubeconfig_data.get('config')
 
             if kubeconfig_yaml:
-                kubeconfigs.append(kubeconfig_yaml)
+                cluster_config = yaml.safe_load(kubeconfig_yaml)
+                if not isinstance(cluster_config, dict):
+                    raise ValueError('Invalid kubeconfig')
+                kubeconfigs.append(name_rancher_kubeconfig(cluster_config, instance, cluster_id))
             else:
                 print(f"Warning: No 'config' field in response for cluster '{cluster_id}' from '{name}'.")
+                failures += 1
         except requests.exceptions.RequestException as e:
-            print(f"Warning: Could not fetch kubeconfig for cluster '{cluster_id}' from '{name}': {e}")
+            report_rancher_error(e, name, f"Fetching kubeconfig for cluster '{cluster_id}'")
+            failures += 1
             continue
+        except managed.ManagedError as error:
+            print(f"Warning: Cluster '{cluster_id}' from '{name}': {error}")
+            failures += 1
+        except (yaml.YAMLError, ValueError, KeyError, TypeError):
+            print(f"Warning: Invalid kubeconfig for cluster '{cluster_id}' from '{name}'; contents suppressed.")
+            failures += 1
 
-    return kubeconfigs
+    return kubeconfigs, failures
 
-def rancher_sync():
+def rancher_sync(managed_tokens=False, rename=False, non_interactive=False, ttl_hours=24,
+                 cleanup_tokens=False, delete=False):
     """
     Fetch kubeconfigs from all configured Rancher instances and merge them into ~/.kube/config.
     """
     instances = load_rancher_config()
     main_config_path = os.path.join(os.path.expanduser("~"), ".kube", "config")
+    state = managed.load_state()
+    interactive = sys.stdin.isatty() and not non_interactive
+    if rename and not interactive:
+        raise managed.ManagedError('--rename-contexts requires an interactive terminal.')
+    if cleanup_tokens:
+        if delete and not interactive:
+            raise managed.ManagedError('Token deletion requires an interactive terminal for review and confirmation.')
+        if not os.path.exists(main_config_path):
+            raise managed.ManagedError('Main kubeconfig is missing; restore it before token cleanup.')
+        config = load_yaml(main_config_path)
+        if not isinstance(config, dict):
+            raise managed.ManagedError('Cannot verify token references in an invalid kubeconfig.')
+        return managed.cleanup(instances, state, config, delete=delete,
+                               config_loader=lambda: load_yaml(main_config_path))
 
-    # Load the main kubeconfig (create stub if missing)
-    print(f"Loading main kubeconfig from: {main_config_path}")
-    main_config = load_or_create_kubeconfig(main_config_path)
-
-    total_merged = 0
+    pending = []
+    failures = 0
+    owners = {}
+    reserved_names = {}
+    for url, names in state['names'].items():
+        for cluster_id, context_name in names.items():
+            reserved_names[context_name] = (url, cluster_id)
+    for instance in instances:
+        for cluster_id, context_name in instance.get('context_names', {}).items():
+            identity = (instance['url'].rstrip('/'), cluster_id)
+            if context_name in reserved_names and reserved_names[context_name] != identity:
+                raise managed.ManagedError('Configured context names must be unique across Rancher clusters.')
+            reserved_names[context_name] = identity
 
     # Fetch and merge from each Rancher instance
     for instance in instances:
-        print(f"\nSyncing from Rancher instance: {instance['name']} ({instance['url']})")
-        kubeconfigs = fetch_rancher_kubeconfigs(instance)
+        instance.update({'_state': state, '_interactive': interactive, '_rename': rename,
+                         '_managed_tokens': managed_tokens, '_ttl_hours': ttl_hours,
+                         '_reserved_names': reserved_names})
+        print(f"\nSyncing from Rancher instance: {instance['name']}")
+        kubeconfigs, failed = fetch_rancher_kubeconfigs(instance)
+        failures += failed
 
-        for kubeconfig_yaml in kubeconfigs:
-            try:
-                cluster_config = yaml.safe_load(kubeconfig_yaml)
-                if not isinstance(cluster_config, dict):
-                    print(f"Warning: Skipping invalid kubeconfig from '{instance['name']}'.")
-                    continue
+        for cluster_config in kubeconfigs:
+            for section in ('clusters', 'contexts', 'users'):
+                for entry in cluster_config.get(section, []):
+                    key = (section, entry['name'])
+                    if key in owners:
+                        sys.exit("Error: Rancher context naming collision. Choose unique context_names; kubeconfig was not changed.")
+                    owners[key] = instance['name']
+            pending.append(cluster_config)
 
-                for section in ["clusters", "contexts", "users"]:
-                    merge_section(main_config, cluster_config, section, force=True)
+    if not pending:
+        print("No kubeconfigs fetched; main kubeconfig was not changed.")
+        return 1 if failures else 0
 
-                total_merged += 1
-            except yaml.YAMLError as e:
-                print(f"Warning: Could not parse kubeconfig from '{instance['name']}': {e}")
-                continue
+    print(f"Loading main kubeconfig from: {main_config_path}")
+    main_config = load_or_create_kubeconfig(main_config_path)
+    for cluster_config in pending:
+        for section in ('clusters', 'contexts', 'users'):
+            merge_section(main_config, cluster_config, section, force=True)
 
     # Write the merged config once
-    write_yaml(main_config_path, main_config)
-    print(f"\nRancher sync complete. Merged {total_merged} kubeconfig(s) into {main_config_path}.")
+    # Save chosen names before publishing credentials, then mark token ownership
+    # active only after the kubeconfig has been durably replaced.
+    managed.save_state(state)
+    managed.atomic_yaml(main_config_path, main_config)
+    managed.commit_tokens(state, main_config)
+    print(f"\nRancher sync {'incomplete' if failures else 'complete'}. Merged {len(pending)} kubeconfig(s) into {main_config_path}; {failures} failure(s).")
+    return 1 if failures else 0
 
 def main():
     parser = argparse.ArgumentParser(description="Merge an additional kubeconfig into your main kubeconfig at $HOME/.kube/config, or sync from configured Rancher instances.")
     parser.add_argument("input_kubeconfig", nargs="?", help="Path to the kubeconfig file to merge.")
     parser.add_argument("--rancher", action="store_true", help="Fetch and merge kubeconfigs from all configured Rancher instances.")
+    parser.add_argument('--managed-tokens', action='store_true', help='Create dedicated, tracked cluster-scoped tokens instead of Rancher-generated kubeconfig tokens.')
+    parser.add_argument('--token-ttl-hours', type=int, default=24, help='Managed token lifetime in hours (default: 24; Rancher may enforce a maximum).')
+    parser.add_argument('--rename-contexts', action='store_true', help='Prompt again for saved Rancher context names.')
+    parser.add_argument('--non-interactive', action='store_true', help='Use saved or default names without prompting.')
+    parser.add_argument('--cleanup-tokens', action='store_true', help='Preview verified obsolete managed tokens without syncing.')
+    parser.add_argument('--delete', action='store_true', help='With --cleanup-tokens, review and confirm token revocation.')
     args = parser.parse_args()
+    if args.token_ttl_hours < 1:
+        parser.error('--token-ttl-hours must be at least 1.')
+    if (args.managed_tokens or args.rename_contexts or args.non_interactive or args.cleanup_tokens or args.delete) and not args.rancher:
+        parser.error('Rancher options require --rancher.')
+    if args.delete and not args.cleanup_tokens:
+        parser.error('--delete requires --cleanup-tokens.')
+    if args.cleanup_tokens and (args.managed_tokens or args.rename_contexts):
+        parser.error('--cleanup-tokens cannot be combined with sync options.')
 
     # Validate mutual exclusion
     if args.rancher and args.input_kubeconfig:
@@ -292,7 +424,15 @@ def main():
 
     if args.rancher:
         # Rancher sync flow
-        rancher_sync()
+        try:
+            with managed.lock():
+                result = rancher_sync(managed_tokens=args.managed_tokens, rename=args.rename_contexts,
+                                     non_interactive=args.non_interactive, ttl_hours=args.token_ttl_hours,
+                                     cleanup_tokens=args.cleanup_tokens, delete=args.delete)
+            sys.exit(result)
+        except (managed.ManagedError, OSError) as error:
+            message = str(error) if isinstance(error, managed.ManagedError) else type(error).__name__
+            sys.exit(f'Error: {message}')
     else:
         # File merge flow
         input_path = os.path.abspath(args.input_kubeconfig)
