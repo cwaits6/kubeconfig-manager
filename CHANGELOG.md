@@ -1,3 +1,10 @@
+## [1.2.2](https://github.com/cwaits6/kubeconfig-manager/compare/v1.2.1...v1.2.2) (2026-11-10)
+
+
+### Bug Fixes
+
+* isolate Rancher contexts and manage sync credentials ([#13](https://github.com/cwaits6/kubeconfig-manager/issues/13)) ([0fcb260](https://github.com/cwaits6/kubeconfig-manager/commit/0fcb2602f3b1a7021edb3c20cdf61cfea69e7710))
+
 ## [1.2.1](https://github.com/cwaits6/kubeconfig-manager/compare/v1.2.0...v1.2.1) (2026-08-10)
 
 
