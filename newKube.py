@@ -20,6 +20,7 @@ EMPTY_KUBECONFIG = {
 }
 
 def load_yaml(path):
+    """Read YAML without disclosing file contents when parsing fails."""
     try:
         with open(path, 'r') as f:
             return yaml.safe_load(f)
@@ -44,6 +45,7 @@ def load_or_create_kubeconfig(path):
     return config
 
 def write_yaml(path, data):
+    """Write a YAML document or stop with a filesystem error."""
     try:
         with open(path, 'w') as f:
             yaml.safe_dump(data, f, default_flow_style=False)
@@ -201,10 +203,14 @@ instances:
             sys.exit(f"Error: Instance '{instance['name']}': {error}")
         context_names = instance.get('context_names', {})
         if not isinstance(context_names, dict) or any(
-            not isinstance(key, str) or not isinstance(value, str) or not value.strip()
+            not isinstance(key, str) or not key.strip() or not isinstance(value, str) or not value.strip()
             for key, value in context_names.items()
         ):
             sys.exit(f"Error: Instance '{instance['name']}' context_names must map cluster IDs to non-empty names.")
+        normalized_names = {key.strip(): value.strip() for key, value in context_names.items()}
+        if len(normalized_names) != len(context_names):
+            sys.exit(f"Error: Instance '{instance['name']}' has duplicate cluster IDs after stripping whitespace.")
+        instance['context_names'] = normalized_names
 
     return instances
 
@@ -247,11 +253,8 @@ def report_rancher_error(error, name, operation):
         detail = f"HTTP {status}" if status else type(error).__name__
     print(f"Warning: {operation} failed for '{name}': {detail}")
 
-def fetch_rancher_kubeconfigs(instance):
-    """
-    Fetch kubeconfigs for all clusters from a Rancher instance.
-    Returns named kubeconfig mappings and the number of failed requests.
-    """
+def list_rancher_clusters(instance):
+    """Fetch cluster metadata without generating kubeconfigs or credentials."""
     url = instance['url'].rstrip('/')
     token = instance['token']
     name = instance['name']
@@ -261,8 +264,6 @@ def fetch_rancher_kubeconfigs(instance):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
-
-    kubeconfigs = []
 
     # Fetch cluster list
     try:
@@ -279,17 +280,28 @@ def fetch_rancher_kubeconfigs(instance):
     if not clusters:
         print(f"No clusters found in '{name}'.")
         return [], 0
+    return clusters, 0
 
-    # Fetch kubeconfig for each cluster
+
+def fetch_rancher_kubeconfigs(instance, clusters=None):
+    """Fetch named kubeconfigs after all cluster naming prompts succeed."""
     failures = 0
+    if clusters is None:
+        clusters, failures = list_rancher_clusters(instance)
+    url = instance['url'].rstrip('/')
+    name = instance['name']
+    verify_ssl = instance.get('verify_ssl', True)
+    headers = {'Authorization': f"Bearer {instance['token']}", 'Content-Type': 'application/json'}
+    kubeconfigs = []
+    if not instance.get('_names_planned'):
+        plan_cluster_names(instance, clusters)
+
+    # Credential creation begins only after the naming pass completes.
     for cluster in clusters:
         cluster_id = cluster.get('id')
         if not cluster_id:
             continue
 
-        if '_state' in instance:
-            managed.choose_name(instance, cluster_id, instance['_state'],
-                                instance.get('_interactive', False), instance.get('_rename', False))
         try:
             if instance.get('_managed_tokens'):
                 cluster_config = managed.create_kubeconfig(
@@ -322,6 +334,15 @@ def fetch_rancher_kubeconfigs(instance):
             failures += 1
 
     return kubeconfigs, failures
+
+
+def plan_cluster_names(instance, clusters):
+    """Complete cancellable naming work before creating remote credentials."""
+    if '_state' in instance:
+        for cluster in clusters:
+            if cluster.get('id'):
+                managed.choose_name(instance, cluster['id'], instance['_state'],
+                                    instance.get('_interactive', False), instance.get('_rename', False))
 
 def rancher_sync(managed_tokens=False, rename=False, non_interactive=False, ttl_hours=24,
                  cleanup_tokens=False, delete=False):
@@ -359,13 +380,21 @@ def rancher_sync(managed_tokens=False, rename=False, non_interactive=False, ttl_
                 raise managed.ManagedError('Configured context names must be unique across Rancher clusters.')
             reserved_names[context_name] = identity
 
-    # Fetch and merge from each Rancher instance
+    # Plan names across every instance before any token-creating request.
+    plans = []
     for instance in instances:
         instance.update({'_state': state, '_interactive': interactive, '_rename': rename,
                          '_managed_tokens': managed_tokens, '_ttl_hours': ttl_hours,
                          '_reserved_names': reserved_names})
         print(f"\nSyncing from Rancher instance: {instance['name']}")
-        kubeconfigs, failed = fetch_rancher_kubeconfigs(instance)
+        clusters, failed = list_rancher_clusters(instance)
+        failures += failed
+        plan_cluster_names(instance, clusters)
+        instance['_names_planned'] = True
+        plans.append((instance, clusters))
+
+    for instance, clusters in plans:
+        kubeconfigs, failed = fetch_rancher_kubeconfigs(instance, clusters)
         failures += failed
 
         for cluster_config in kubeconfigs:
@@ -397,6 +426,7 @@ def rancher_sync(managed_tokens=False, rename=False, non_interactive=False, ttl_
     return 1 if failures else 0
 
 def main():
+    """Validate CLI options and run file merging, Rancher sync, or cleanup."""
     parser = argparse.ArgumentParser(description="Merge an additional kubeconfig into your main kubeconfig at $HOME/.kube/config, or sync from configured Rancher instances.")
     parser.add_argument("input_kubeconfig", nargs="?", help="Path to the kubeconfig file to merge.")
     parser.add_argument("--rancher", action="store_true", help="Fetch and merge kubeconfigs from all configured Rancher instances.")

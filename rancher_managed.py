@@ -19,8 +19,14 @@ import yaml
 class ManagedError(Exception):
     """An error message safe to display without request or response contents."""
 
+    def __init__(self, message, status=None):
+        """Retain a safe HTTP status for recovery without exposing responses."""
+        super().__init__(message)
+        self.status = status
+
 
 def config_directory():
+    """Return the directory containing local configuration and ownership state."""
     return Path(os.path.expanduser('~')) / '.config/kubeconfig-manager'
 
 
@@ -39,7 +45,8 @@ def lock():
 
 
 def atomic_yaml(path, data):
-    path = Path(path)
+    """Atomically write private YAML to the destination, preserving symlinks."""
+    path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name)
     try:
@@ -54,6 +61,7 @@ def atomic_yaml(path, data):
 
 
 def load_state():
+    """Load validated private ownership state or initialize a new installation."""
     path = config_directory() / 'state.yaml'
     if not path.exists():
         return {'installation_id': str(uuid4()), 'names': {}, 'tokens': []}
@@ -82,6 +90,7 @@ def load_state():
 
 
 def save_state(state):
+    """Persist ownership metadata and chosen names without token secrets."""
     atomic_yaml(config_directory() / 'state.yaml', state)
 
 
@@ -104,6 +113,7 @@ def resolve_token(instance):
 
 
 def choose_name(instance, cluster_id, state, interactive=False, rename=False):
+    """Choose and reserve a persistent name for one Rancher URL and cluster ID."""
     url = instance['url'].rstrip('/')
     saved = state['names'].setdefault(url, {})
     configured = instance.get('context_names', {}).get(cluster_id)
@@ -112,6 +122,7 @@ def choose_name(instance, cluster_id, state, interactive=False, rename=False):
     reserved = instance.get('_reserved_names', {})
 
     def validate(value):
+        """Reject blank names and names reserved by another cluster."""
         if not value.strip():
             return 'Enter a context name.'
         if value.strip() in reserved and reserved[value.strip()] != identity:
@@ -136,6 +147,7 @@ def choose_name(instance, cluster_id, state, interactive=False, rename=False):
 
 
 def api(instance, method, path, **kwargs):
+    """Call Rancher without redirects and expose only sanitized failure details."""
     token = kwargs.pop('token', instance['token'])
     try:
         response = requests.request(
@@ -151,12 +163,13 @@ def api(instance, method, path, **kwargs):
     except requests.RequestException as error:
         status = error.response.status_code if error.response is not None else None
         raise ManagedError(f"Rancher {method} failed: HTTP {status}" if status else
-                           f'Rancher {method} failed: {type(error).__name__}') from None
+                           f'Rancher {method} failed: {type(error).__name__}', status=status) from None
     except ValueError:
         raise ManagedError('Rancher returned invalid JSON; contents suppressed.') from None
 
 
 def owned(record, remote):
+    """Require every recorded ownership field to match the remote token."""
     fields = ('id', 'uuid', 'userId', 'clusterId', 'description')
     return isinstance(remote, dict) and all(
         isinstance(record.get(field), str) and bool(record[field])
@@ -199,6 +212,7 @@ def create_kubeconfig(instance, cluster_id, state, ttl_hours):
 
 
 def referenced_token_ids(config):
+    """Collect IDs of static tokens referenced anywhere in the kubeconfig."""
     return {
         token.split(':', 1)[0]
         for entry in config.get('users', [])
@@ -207,6 +221,7 @@ def referenced_token_ids(config):
 
 
 def commit_tokens(state, config):
+    """Mark tokens active only after their kubeconfig has been published."""
     active = referenced_token_ids(config)
     for record in state['tokens']:
         record['status'] = 'active' if record['id'] in active else 'superseded'
@@ -219,7 +234,7 @@ def cleanup(instances, state, config, delete=False, config_loader=None):
     active = referenced_token_ids(config)
     candidates = []
     failures = 0
-    for record in state['tokens']:
+    for record in list(state['tokens']):
         instance = by_url.get(record['url'])
         if not instance or record['id'] in active or record.get('status') == 'active':
             continue
@@ -236,6 +251,11 @@ def cleanup(instances, state, config, delete=False, config_loader=None):
             candidates.append((instance, record))
             print(f"Obsolete: {instance['name']} / {record['clusterId']} / {record['id']} / {record['description']}")
         except ManagedError as error:
+            if error.status == 404:
+                state['tokens'].remove(record)
+                save_state(state)
+                print(f"Removed already-missing token {record['id']} from local state.")
+                continue
             print(str(error))
             failures += 1
     if not candidates:
@@ -263,6 +283,11 @@ def cleanup(instances, state, config, delete=False, config_loader=None):
             save_state(state)
             print(f"Revoked {record['id']}.")
         except ManagedError as error:
+            if error.status == 404:
+                state['tokens'].remove(record)
+                save_state(state)
+                print(f"Removed already-missing token {record['id']} from local state.")
+                continue
             print(str(error))
             failures += 1
     return 1 if failures else 0

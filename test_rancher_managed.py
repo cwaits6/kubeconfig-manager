@@ -15,6 +15,7 @@ import newKube as app
 
 class ManagedTests(unittest.TestCase):
     def setUp(self):
+        """Isolate tests from real credentials, network requests, and user state."""
         self.instance = {'name': 'prod', 'url': 'https://example.test', 'token': 'api:synthetic'}
         self.state = {'installation_id': 'installation', 'names': {}, 'tokens': []}
         self.output = io.StringIO()
@@ -23,6 +24,7 @@ class ManagedTests(unittest.TestCase):
         self.addCleanup(redirect.__exit__, None, None, None)
 
     def record(self, **changes):
+        """Build a synthetic ownership record with optional field overrides."""
         record = {'id': 'token-old', 'uuid': 'server-uuid', 'userId': 'user-1',
                   'clusterId': 'local', 'description': 'kubeconfig-manager:installation:local:nonce',
                   'url': 'https://example.test', 'status': 'superseded'}
@@ -30,10 +32,12 @@ class ManagedTests(unittest.TestCase):
         return record
 
     def test_env_reference_reads_only_the_named_mock_variable(self):
+        """Regression coverage: env reference reads only the named mock variable."""
         with patch.object(managed.os, 'environ', {'SYNTHETIC_TOKEN': 'access:synthetic'}):
             self.assertEqual(managed.resolve_token({'token_env': 'SYNTHETIC_TOKEN'}), 'access:synthetic')
 
     def test_missing_env_and_ambiguous_sources_fail_without_values(self):
+        """Regression coverage: missing env and ambiguous sources fail without values."""
         with patch.object(managed.os, 'environ', {}):
             for instance in ({'token_env': 'MISSING'}, {'token_env': 'MISSING', 'token': 'PRIVATE'}):
                 with self.assertRaises(managed.ManagedError) as error:
@@ -42,6 +46,7 @@ class ManagedTests(unittest.TestCase):
 
     @patch.object(managed.questionary, 'text')
     def test_name_prompt_once_and_persist_across_instance_display_name_change(self, text):
+        """Regression coverage: name prompt once and persist across instance display name change."""
         text.return_value.ask.return_value = 'my-control-plane'
         self.assertEqual(managed.choose_name(self.instance, 'local', self.state, True), 'my-control-plane')
         self.instance = {**self.instance, 'name': 'new-instance-display-name', 'context_names': {}}
@@ -50,17 +55,20 @@ class ManagedTests(unittest.TestCase):
 
     @patch.object(managed.questionary, 'text')
     def test_rename_option_prompts_again(self, text):
+        """Regression coverage: rename option prompts again."""
         self.state['names'] = {'https://example.test': {'local': 'before'}}
         text.return_value.ask.return_value = 'after'
         managed.choose_name(self.instance, 'local', self.state, True, True)
         self.assertEqual(self.state['names']['https://example.test']['local'], 'after')
 
     def test_noninteractive_names_are_stable(self):
+        """Regression coverage: noninteractive names are stable."""
         self.assertEqual(managed.choose_name(self.instance, 'local', self.state), 'prod-local')
         self.assertEqual(self.state['names']['https://example.test']['local'], 'prod-local')
 
     @patch.object(managed.questionary, 'text')
     def test_conflicting_name_is_rejected_by_prompt_validator(self, text):
+        """Regression coverage: conflicting name is rejected by prompt validator."""
         self.instance['_reserved_names'] = {'taken': ('https://other.test', 'local')}
         text.return_value.ask.return_value = 'unique'
         managed.choose_name(self.instance, 'local', self.state, True)
@@ -71,7 +79,9 @@ class ManagedTests(unittest.TestCase):
     @patch.object(managed, 'save_state')
     @patch.object(managed, 'api')
     def test_create_records_ownership_without_secret_and_verifies_new_credential(self, api, save):
+        """Regression coverage: create records ownership without secret and verifies new credential."""
         def response(instance, method, path, **kwargs):
+            """Simulate token creation and authenticated cluster verification."""
             if method == 'POST':
                 return {**self.record(), 'description': kwargs['json']['description'],
                         'token': 'token-old:PRIVATE'}
@@ -88,12 +98,14 @@ class ManagedTests(unittest.TestCase):
 
     @patch.object(managed, 'save_state')
     def test_commit_marks_only_referenced_tokens_active(self, save):
+        """Regression coverage: commit marks only referenced tokens active."""
         self.state['tokens'] = [self.record(), self.record(id='token-new', status='pending')]
         managed.commit_tokens(self.state, {'users': [{'user': {'token': 'token-new:synthetic'}}]})
         self.assertEqual([token['status'] for token in self.state['tokens']], ['superseded', 'active'])
 
     @patch.object(managed, 'api')
     def test_cleanup_preview_never_deletes(self, api):
+        """Regression coverage: cleanup preview never deletes."""
         record = self.record()
         self.state['tokens'] = [record]
         api.return_value = record
@@ -103,12 +115,14 @@ class ManagedTests(unittest.TestCase):
 
     @patch.object(managed, 'api')
     def test_cleanup_ignores_active_and_authentication_tokens(self, api):
+        """Regression coverage: cleanup ignores active and authentication tokens."""
         self.state['tokens'] = [self.record(), self.record(id='api'), self.record(id='active', status='active')]
         managed.cleanup([self.instance], self.state, {'users': [{'user': {'token': 'token-old:synthetic'}}]})
         api.assert_not_called()
 
     @patch.object(managed, 'api')
     def test_description_match_alone_never_authorizes_deletion(self, api):
+        """Regression coverage: description match alone never authorizes deletion."""
         self.state['tokens'] = [self.record()]
         api.return_value = self.record(uuid='different-server-uuid')
         managed.cleanup([self.instance], self.state, {}, delete=True)
@@ -117,6 +131,7 @@ class ManagedTests(unittest.TestCase):
     @patch.object(managed.questionary, 'confirm')
     @patch.object(managed, 'api')
     def test_canceled_cleanup_never_deletes(self, api, confirm):
+        """Regression coverage: canceled cleanup never deletes."""
         self.state['tokens'] = [self.record()]
         api.return_value = self.record()
         confirm.return_value.ask.return_value = False
@@ -127,6 +142,7 @@ class ManagedTests(unittest.TestCase):
     @patch.object(managed.questionary, 'confirm')
     @patch.object(managed, 'api')
     def test_confirmed_cleanup_rechecks_and_deletes_exact_record(self, api, confirm, save):
+        """Regression coverage: confirmed cleanup rechecks and deletes exact record."""
         self.state['tokens'] = [self.record()]
         api.return_value = self.record()
         confirm.return_value.ask.return_value = True
@@ -138,6 +154,7 @@ class ManagedTests(unittest.TestCase):
     @patch.object(managed.questionary, 'confirm')
     @patch.object(managed, 'api')
     def test_cleanup_rechecks_main_config_before_deletion(self, api, confirm):
+        """Regression coverage: cleanup rechecks main config before deletion."""
         self.state['tokens'] = [self.record()]
         api.return_value = self.record()
         confirm.return_value.ask.return_value = True
@@ -148,6 +165,7 @@ class ManagedTests(unittest.TestCase):
     @patch.object(managed.questionary, 'confirm')
     @patch.object(managed, 'api')
     def test_metadata_changed_after_preview_refuses_deletion(self, api, confirm):
+        """Regression coverage: metadata changed after preview refuses deletion."""
         self.state['tokens'] = [self.record()]
         api.side_effect = [self.record(), self.record(userId='someone-else')]
         confirm.return_value.ask.return_value = True
@@ -156,12 +174,14 @@ class ManagedTests(unittest.TestCase):
 
     @patch.object(managed.requests, 'request')
     def test_network_error_suppresses_secret_exception_text(self, request):
+        """Regression coverage: network error suppresses secret exception text."""
         request.side_effect = requests.ConnectionError('PRIVATE')
         with self.assertRaises(managed.ManagedError) as error:
             managed.api(self.instance, 'GET', '/v3/token/test')
         self.assertNotIn('PRIVATE', str(error.exception))
 
     def test_state_roundtrip_is_private_and_names_are_persistent(self):
+        """Regression coverage: state roundtrip is private and names are persistent."""
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(managed, 'config_directory', return_value=Path(directory)):
                 managed.choose_name(self.instance, 'local', self.state)
@@ -169,12 +189,71 @@ class ManagedTests(unittest.TestCase):
                 self.assertEqual(managed.load_state(), self.state)
                 self.assertEqual((Path(directory) / 'state.yaml').stat().st_mode & 0o777, 0o600)
 
+    def test_atomic_yaml_preserves_symlink_and_updates_target(self):
+        """Regression coverage: atomic yaml preserves symlink and updates target."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'dotfiles/kubeconfig'
+            target.parent.mkdir()
+            target.write_text('old: config\n')
+            link = Path(directory) / 'config'
+            link.symlink_to(Path('dotfiles/kubeconfig'))
+            managed.atomic_yaml(link, {'new': 'config'})
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(yaml.safe_load(target.read_text()), {'new': 'config'})
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    @patch.object(managed, 'save_state')
+    @patch.object(managed, 'api')
+    def test_cleanup_forgets_all_missing_tokens_without_deleting(self, api, save):
+        """Regression coverage: cleanup forgets all missing tokens without deleting."""
+        self.state['tokens'] = [self.record(), self.record(id='token-other')]
+        api.side_effect = managed.ManagedError('Missing', status=404)
+        self.assertEqual(managed.cleanup([self.instance], self.state, {}), 0)
+        self.assertEqual(self.state['tokens'], [])
+        self.assertEqual(save.call_count, 2)
+        self.assertEqual([call.args[1] for call in api.call_args_list], ['GET', 'GET'])
+
+    @patch.object(managed, 'save_state')
+    @patch.object(managed, 'api')
+    def test_cleanup_retains_records_for_non_404_errors(self, api, save):
+        """Regression coverage: cleanup retains records for non 404 errors."""
+        self.state['tokens'] = [self.record()]
+        api.side_effect = managed.ManagedError('Forbidden', status=403)
+        self.assertEqual(managed.cleanup([self.instance], self.state, {}), 1)
+        self.assertEqual(len(self.state['tokens']), 1)
+        save.assert_not_called()
+
+    @patch.object(managed, 'save_state')
+    @patch.object(managed.questionary, 'confirm')
+    @patch.object(managed, 'api')
+    def test_cleanup_handles_token_disappearing_after_preview(self, api, confirm, save):
+        """Regression coverage: cleanup handles token disappearing after preview."""
+        for responses in ([self.record(), managed.ManagedError('Missing', status=404)],
+                          [self.record(), self.record(), managed.ManagedError('Missing', status=404)]):
+            self.state['tokens'] = [self.record()]
+            api.side_effect = responses
+            confirm.return_value.ask.return_value = True
+            self.assertEqual(managed.cleanup([self.instance], self.state, {}, delete=True), 0)
+            self.assertEqual(self.state['tokens'], [])
+
+    @patch.object(managed.requests, 'request')
+    def test_api_preserves_http_status_without_exposing_response(self, request):
+        """Regression coverage: api preserves http status without exposing response."""
+        response = requests.Response()
+        response.status_code = 404
+        request.return_value.raise_for_status.side_effect = requests.HTTPError('PRIVATE', response=response)
+        with self.assertRaises(managed.ManagedError) as error:
+            managed.api(self.instance, 'GET', '/v3/token/example')
+        self.assertEqual(error.exception.status, 404)
+        self.assertNotIn('PRIVATE', str(error.exception))
+
     def test_two_syncs_then_cleanup_with_synthetic_server_and_files(self):
         """Exercise env config, naming, rotation, persisted ownership and cleanup."""
         remote_tokens = {}
         deleted = []
 
         def server(instance, method, path, **kwargs):
+            """Simulate Rancher token creation, inspection, verification, and deletion."""
             if method == 'POST':
                 number = len(remote_tokens) + 1
                 token_id = f'token-{number}'

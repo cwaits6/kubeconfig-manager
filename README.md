@@ -153,7 +153,7 @@ Sync reads each token from the configured `token_env` variable or literal
 `token` in `~/.config/kubeconfig-manager/rancher.yaml`. Rotating a token in Rancher
 requires updating that source too. Use the **complete API key** in
 `access-key:secret-key` format from the corresponding Rancher instance, without
-a `Bearer ` prefix or surrounding whitespace. Make sure the token is active,
+a `Bearer` prefix or surrounding whitespace. Make sure the token is active,
 unexpired, and scoped for the clusters you want to sync.
 
 HTTP 401 means the server rejected the configured credentials. HTTP 403 means

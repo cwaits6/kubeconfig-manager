@@ -13,6 +13,7 @@ import newKube as app
 
 
 def kubeconfig(token='old'):
+    """Build a synthetic kubeconfig with colliding local entry names."""
     return {
         'clusters': [{'name': 'local', 'cluster': {'server': 'https://example.test'}}],
         'users': [{'name': 'local', 'user': {'token': token}}],
@@ -23,6 +24,10 @@ def kubeconfig(token='old'):
 
 class RancherTests(unittest.TestCase):
     def setUp(self):
+        """Isolate tests from real credentials, network requests, and user state."""
+        network = patch.object(app.requests, 'get')
+        network.start().json.return_value = {'data': []}
+        self.addCleanup(network.stop)
         # Never inspect the developer's real ownership state or credentials.
         state = patch.object(app.managed, 'load_state', return_value={'installation_id': 'test', 'names': {}, 'tokens': []})
         state.start()
@@ -36,6 +41,7 @@ class RancherTests(unittest.TestCase):
         self.addCleanup(self.redirect.__exit__, None, None, None)
 
     def test_two_local_clusters_do_not_share_any_entries(self):
+        """Regression coverage: two local clusters do not share any entries."""
         merged = deepcopy(app.EMPTY_KUBECONFIG)
         for name in ('prod', 'stage'):
             config = app.name_rancher_kubeconfig(kubeconfig(name), {'name': name}, 'local')
@@ -48,6 +54,7 @@ class RancherTests(unittest.TestCase):
             self.assertEqual(context['context']['user'], f'{prefix}-local::local')
 
     def test_custom_name_survives_credential_and_display_name_changes(self):
+        """Regression coverage: custom name survives credential and display name changes."""
         instance = {'name': 'prod', 'context_names': {'local': 'my-control-plane'}}
         first = app.name_rancher_kubeconfig(kubeconfig(), instance, 'local')
         second_source = kubeconfig('rotated')
@@ -61,6 +68,7 @@ class RancherTests(unittest.TestCase):
         self.assertEqual(first['users'][0]['user']['token'], 'rotated')
 
     def test_multiple_contexts_and_references(self):
+        """Regression coverage: multiple contexts and references."""
         source = kubeconfig()
         source['contexts'].append({'name': 'direct', 'context': {'cluster': 'local', 'user': 'local'}})
         original = deepcopy(source)
@@ -72,6 +80,7 @@ class RancherTests(unittest.TestCase):
 
     @patch.object(app.requests, 'get')
     def test_401_is_actionable_and_never_prints_exception_secrets(self, get):
+        """Regression coverage: 401 is actionable and never prints exception secrets."""
         response = requests.Response()
         response.status_code = 401
         get.return_value.raise_for_status.side_effect = requests.HTTPError('PRIVATE-CREDENTIAL', response=response)
@@ -85,6 +94,7 @@ class RancherTests(unittest.TestCase):
     @patch.object(app.requests, 'post')
     @patch.object(app.requests, 'get')
     def test_fetch_maps_using_cluster_id(self, get, post):
+        """Regression coverage: fetch maps using cluster id."""
         get.return_value.json.return_value = {'data': [{'id': 'local', 'name': 'display-name'}]}
         post.return_value.json.return_value = {'config': yaml.safe_dump(kubeconfig())}
         configs, failures = app.fetch_rancher_kubeconfigs({'name': 'prod', 'url': 'https://example.test', 'token': 'dummy', 'context_names': {'local': 'chosen'}})
@@ -94,8 +104,9 @@ class RancherTests(unittest.TestCase):
     @patch.object(app, 'write_yaml')
     @patch.object(app, 'load_or_create_kubeconfig')
     @patch.object(app, 'fetch_rancher_kubeconfigs', return_value=([], 1))
-    @patch.object(app, 'load_rancher_config', return_value=[{'name': 'prod'}])
+    @patch.object(app, 'load_rancher_config', return_value=[{'name': 'prod', 'url': 'https://example.test', 'token': 'synthetic'}])
     def test_failed_sync_does_not_touch_kubeconfig(self, load, fetch, main, write):
+        """Regression coverage: failed sync does not touch kubeconfig."""
         self.assertEqual(app.rancher_sync(), 1)
         main.assert_not_called()
         write.assert_not_called()
@@ -103,8 +114,9 @@ class RancherTests(unittest.TestCase):
     @patch.object(app, 'write_yaml')
     @patch.object(app, 'load_or_create_kubeconfig')
     @patch.object(app, 'fetch_rancher_kubeconfigs')
-    @patch.object(app, 'load_rancher_config', return_value=[{'name': 'prod'}, {'name': 'stage'}])
+    @patch.object(app, 'load_rancher_config', return_value=[{'name': 'prod', 'url': 'https://example.test', 'token': 'synthetic'}, {'name': 'stage', 'url': 'https://stage.test', 'token': 'synthetic'}])
     def test_duplicate_custom_names_abort_before_writing(self, load, fetch, main, write):
+        """Regression coverage: duplicate custom names abort before writing."""
         config = app.name_rancher_kubeconfig(kubeconfig(), {'name': 'prod', 'context_names': {'local': 'same'}}, 'local')
         fetch.return_value = ([config], 0)
         with self.assertRaises(SystemExit):
@@ -113,8 +125,9 @@ class RancherTests(unittest.TestCase):
         write.assert_not_called()
 
     @patch.object(app, 'fetch_rancher_kubeconfigs')
-    @patch.object(app, 'load_rancher_config', return_value=[{'name': 'prod'}, {'name': 'stage'}])
+    @patch.object(app, 'load_rancher_config', return_value=[{'name': 'prod', 'url': 'https://example.test', 'token': 'synthetic'}, {'name': 'stage', 'url': 'https://stage.test', 'token': 'synthetic'}])
     def test_partial_sync_preserves_active_context_and_other_entries(self, load, fetch):
+        """Regression coverage: partial sync preserves active context and other entries."""
         fetched = app.name_rancher_kubeconfig(kubeconfig('rotated'), {'name': 'prod'}, 'local')
         fetch.side_effect = [([fetched], 0), ([], 1)]
         with tempfile.TemporaryDirectory() as directory:
@@ -129,6 +142,7 @@ class RancherTests(unittest.TestCase):
         self.assertEqual(result['users'][1]['user']['token'], 'rotated')
 
     def test_invalid_alias_config_rejected_without_reading_user_config(self):
+        """Regression coverage: invalid alias config rejected without reading user config."""
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / '.config/kubeconfig-manager/rancher.yaml'
             path.parent.mkdir(parents=True)
@@ -138,6 +152,48 @@ class RancherTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as error:
                     app.load_rancher_config()
             self.assertIn('context_names', str(error.exception))
+
+    def test_context_names_normalize_and_reject_ambiguous_cluster_ids(self):
+        """Regression coverage: context names normalize and reject ambiguous cluster ids."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / '.config/kubeconfig-manager/rancher.yaml'
+            path.parent.mkdir(parents=True)
+            for names, valid in (({' local ': ' prod '}, True),
+                                 ({'local': 'prod', ' local ': 'stage'}, False),
+                                 ({'   ': 'prod'}, False)):
+                path.write_text(yaml.safe_dump({'instances': [{'name': 'prod', 'url': 'https://example.test', 'token': 'dummy', 'context_names': names}]}))
+                path.chmod(0o600)
+                with patch.object(app.os.path, 'expanduser', return_value=directory):
+                    if valid:
+                        self.assertEqual(app.load_rancher_config()[0]['context_names'], {'local': 'prod'})
+                    else:
+                        with self.assertRaises(SystemExit):
+                            app.load_rancher_config()
+
+    @patch.object(app.managed, 'create_kubeconfig')
+    @patch.object(app.managed, 'choose_name')
+    @patch.object(app, 'list_rancher_clusters', return_value=([{'id': 'first'}, {'id': 'second'}], 0))
+    def test_cancel_second_cluster_name_creates_no_tokens(self, clusters, choose, create):
+        """Regression coverage: cancel second cluster name creates no tokens."""
+        instance = {'name': 'prod', 'url': 'https://example.test', 'token': 'synthetic',
+                    '_state': {}, '_managed_tokens': True, '_ttl_hours': 24}
+        choose.side_effect = ['first-name', app.managed.ManagedError('Canceled')]
+        with self.assertRaises(app.managed.ManagedError):
+            app.fetch_rancher_kubeconfigs(instance)
+        create.assert_not_called()
+
+    @patch.object(app.managed, 'create_kubeconfig')
+    @patch.object(app.managed, 'choose_name')
+    @patch.object(app, 'list_rancher_clusters', return_value=([{'id': 'local'}], 0))
+    @patch.object(app, 'load_rancher_config')
+    def test_cancel_second_instance_name_creates_no_tokens(self, load, clusters, choose, create):
+        """Regression coverage: cancel second instance name creates no tokens."""
+        load.return_value = [{'name': name, 'url': f'https://{name}.test', 'token': 'synthetic'}
+                             for name in ('prod', 'stage')]
+        choose.side_effect = ['first-name', app.managed.ManagedError('Canceled')]
+        with self.assertRaises(app.managed.ManagedError):
+            app.rancher_sync(managed_tokens=True)
+        create.assert_not_called()
 
 
 if __name__ == '__main__':
