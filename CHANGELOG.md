@@ -1,3 +1,5 @@
+## [1.3.1](https://github.com/cwaits6/kubeconfig-manager/compare/v1.3.0...v1.3.1) (2026-11-16)
+
 # [1.3.0](https://github.com/cwaits6/kubeconfig-manager/compare/v1.2.3...v1.3.0) (2026-11-10)
 
 
